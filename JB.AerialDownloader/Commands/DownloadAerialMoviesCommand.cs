@@ -10,13 +10,14 @@ using System.Threading.Tasks.Dataflow;
 using JB.AerialDownloader.Models;
 using JB.AerialDownloader.Models.Apple;
 using JB.AerialDownloader.Options;
+using Jil;
 
 namespace JB.AerialDownloader.Commands
 {
     public class DownloadAerialMoviesCommand : ICommand<DownloadAerialMoviesOptions>
     {
         /// <summary>
-        /// Executes the command and returns an exit code.
+        /// Executes the command and returns the corresponding exit code.
         /// </summary>
         /// <param name="options">The options.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
@@ -103,8 +104,16 @@ namespace JB.AerialDownloader.Commands
                 : 0;
         }
 
+        /// <summary>
+        /// Downloads the video from the provided <paramref name="videoUrl"/> into the <paramref name="targetDirectory"/>.
+        /// </summary>
+        /// <param name="videoUrl">The video URL.</param>
+        /// <param name="targetDirectory">The target directory.</param>
+        /// <param name="overwriteExistingFile">if set to <c>true</c> [overwrite existing file].</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        /// <returns></returns>
         private async Task DownloadVideo(string videoUrl, string targetDirectory, bool overwriteExistingFile,
-            CancellationToken cancellationToken = default)
+                    CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -168,9 +177,16 @@ namespace JB.AerialDownloader.Commands
             }
         }
 
+        /// <summary>
+        /// Gets the videos from the provided <paramref name="jsonUrl"/>.
+        /// </summary>
+        /// <param name="jsonUrl">The json URL.</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        /// <returns></returns>
         private async Task<ICollection<AerialVideo>> GetVideosFromJsonUrl(string jsonUrl, CancellationToken cancellationToken = default(CancellationToken))
         {
             var result = new List<AerialVideo>();
+            var desrializationOptions = Jil.Options.ExcludeNullsIncludeInheritedCamelCase;
 
             using (var httpClient = new HttpClient())
             {
@@ -186,8 +202,7 @@ namespace JB.AerialDownloader.Commands
                         IdAndAssets[] idsAndAssets = null;
                         try
                         {
-                            idsAndAssets = Jil.JSON.Deserialize<IdAndAssets[]>(jsonString,
-                                Jil.Options.ExcludeNullsIncludeInheritedCamelCase);
+                            idsAndAssets = Jil.JSON.Deserialize<IdAndAssets[]>(jsonString, desrializationOptions);
 
                             foreach (var asset in (idsAndAssets ?? Enumerable.Empty<IdAndAssets>())
                                 .SelectMany(idAndAssets => idAndAssets.Assets).Where(asset =>
@@ -212,45 +227,116 @@ namespace JB.AerialDownloader.Commands
                         {
                             throw;
                         }
-                        catch (Exception)
+                        catch (DeserializationException)
                         {
                             // if it cannot be parsed, skip forward and try to parse it as versioned asset
                             goto VersionedAssets;
                         }
                     }
-                    
+
                     VersionedAssets:
                     {
-                        //// assume it's a versioned list of assets, such as https://sylvan.apple.com/Aerials/2x/entries.json
-                        //if (NetJSON.NetJSON.DeserializeObject(jsonString) is Dictionary<string, object> parsedObject)
-                        //{
-                        //    var normalizedDictionary = new Dictionary<string, object>(parsedObject, StringComparer.InvariantCultureIgnoreCase);
-                        //    // this is a version 1 assets list
-                        //    if (normalizedDictionary.ContainsKey("version") && !string.IsNullOrWhiteSpace(normalizedDictionary["version"]?.ToString()) && normalizedDictionary["version"].ToString().Trim() == "1")
-                        //    {
-                        //        if (normalizedDictionary.ContainsKey("assets") &&
-                        //            normalizedDictionary["assets"] is List<object> assetsAsObjects)
-                        //        {
-                        //            foreach (IDictionary<string, object> assetAsDictionary in assetsAsObjects)
-                        //            {
-                        //                cancellationToken.ThrowIfCancellationRequested();
-                        //            }
-                        //        }
-                        //        else
-                        //        {
-                        //            // ToDo: uhm - this is unexpected - log maybe
-                        //        }
-                        //    }
-                        //    else
-                        //    {
-                        //        // ToDo: That's a new one.. which we don't handle, yet!? Probably log
-                        //    }
-                        //}
+                        cancellationToken.ThrowIfCancellationRequested();
+
+                        // assume it's a versioned list of assets, such as https://sylvan.apple.com/Aerials/2x/entries.json
+                        var deserializedJsonAsDynamic = JSON.DeserializeDynamic(jsonString, desrializationOptions);
+                        var versionInJson = deserializedJsonAsDynamic.version;
+                        var assetsInJson = deserializedJsonAsDynamic.assets;
+
+                        if (versionInJson != null && assetsInJson != null)
+                        {
+                            System.ComponentModel.TypeConverter versionTypeConverter =
+                                System.ComponentModel.TypeDescriptor.GetConverter(versionInJson);
+                            if (versionTypeConverter.CanConvertTo(typeof(int)) &&
+                                versionTypeConverter.ConvertTo(versionInJson, typeof(int)) is int versionAsInt)
+                            {
+                                if (versionAsInt == 1)
+                                {
+                                    foreach (var asset in assetsInJson)
+                                    {
+                                        cancellationToken.ThrowIfCancellationRequested();
+
+                                        System.ComponentModel.TypeConverter assetTypeConverter =
+                                            System.ComponentModel.TypeDescriptor.GetConverter(asset);
+                                        if (assetTypeConverter.CanConvertTo(typeof(IDictionary<string, dynamic>)) &&
+                                            assetTypeConverter.ConvertTo(asset, typeof(IDictionary<string, dynamic>)) is
+                                                IDictionary<string, dynamic> assetDictionary)
+                                        {
+                                            string id = assetDictionary.ContainsKey("id") ? assetDictionary["id"] : string.Empty;
+                                            string accessibilityLabel = assetDictionary.ContainsKey("accessibilityLabel") ? assetDictionary["accessibilityLabel"] : string.Empty;
+                                            string url1080SDR = assetDictionary.ContainsKey("url-1080-SDR") ? assetDictionary["url-1080-SDR"] : string.Empty;
+                                            string url1080HDR = assetDictionary.ContainsKey("url-1080-HDR") ? assetDictionary["url-1080-HDR"] : string.Empty;
+                                            string url4KSDR = assetDictionary.ContainsKey("url-4K-SDR") ? assetDictionary["url-4K-SDR"] : string.Empty;
+                                            string url4KHDR = assetDictionary.ContainsKey("url-4K-HDR") ? assetDictionary["url-4K-HDR"] : string.Empty;
+
+                                            var videoDownloadUrls = new List<AerialVideoDownloadUrl>();
+                                            if (!string.IsNullOrWhiteSpace(url1080SDR) && Uri.IsWellFormedUriString(url1080SDR, UriKind.Absolute))
+                                            {
+                                                videoDownloadUrls.Add(new AerialVideoDownloadUrl(new Uri(url1080SDR), AerialVideoQuality.SDR1080));
+                                            }
+
+                                            if (!string.IsNullOrWhiteSpace(url1080HDR) && Uri.IsWellFormedUriString(url1080HDR, UriKind.Absolute))
+                                            {
+                                                videoDownloadUrls.Add(new AerialVideoDownloadUrl(new Uri(url1080HDR), AerialVideoQuality.HDR1080));
+                                            }
+
+                                            if (!string.IsNullOrWhiteSpace(url4KSDR) && Uri.IsWellFormedUriString(url4KSDR, UriKind.Absolute))
+                                            {
+                                                videoDownloadUrls.Add(new AerialVideoDownloadUrl(new Uri(url4KSDR), AerialVideoQuality.SDR4K));
+                                            }
+
+                                            if (!string.IsNullOrWhiteSpace(url4KHDR) && Uri.IsWellFormedUriString(url4KHDR, UriKind.Absolute))
+                                            {
+                                                videoDownloadUrls.Add(new AerialVideoDownloadUrl(new Uri(url4KHDR), AerialVideoQuality.HDR4K));
+                                            }
+
+                                            if (string.IsNullOrWhiteSpace(id) ||
+                                                string.IsNullOrWhiteSpace(accessibilityLabel) ||
+                                                videoDownloadUrls.Count == 0)
+                                            {
+                                                continue;
+                                            }
+
+                                            // else
+                                            cancellationToken.ThrowIfCancellationRequested();
+
+                                            result.Add(
+                                                new AerialVideo(
+                                                    id,
+                                                    videoDownloadUrls,
+                                                    accessibilityLabel,
+                                                    AerialVideoTimeOfDay.Unspecified));
+                                        }
+                                        else
+                                        {
+                                            continue;
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    goto UnknownJsonFormat;
+                                }
+                            }
+                            else
+                            {
+                                goto UnknownJsonFormat;
+                            }
+                        }
+                        else
+                        {
+                            goto UnknownJsonFormat;
+                        }
+                    }
+                    UnknownJsonFormat:
+                    {
+                        // ToDo: well.. probably log
                     }
                 }
             }
 
             cancellationToken.ThrowIfCancellationRequested();
+
             return result
                 .OrderBy(aerialVideo => aerialVideo.ToString(), StringComparer.InvariantCultureIgnoreCase)
                 .ToList();
